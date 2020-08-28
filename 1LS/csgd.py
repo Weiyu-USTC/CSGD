@@ -1,6 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+import time
+import os
+
+# ====================================================
+def log(*k, **kw):
+    timeStamp = time.strftime('[%y-%m-%d %H:%M:%S] ', time.localtime())
+    print(timeStamp, end='')
+    print(*k, **kw)
 
 #num_samples = 1000
 num_machines = 10
@@ -26,11 +34,7 @@ def create(row, col):
 
 
 def cal_mean(grad_li):
-    m = len(grad_li)
-    grad = np.zeros_like(grad_li[0])
-    grad = sum(grad_li)
-    # grad = grad / m
-    return grad
+    return sum(grad_li) / len(grad_li)
 
 
 class Machine:
@@ -104,7 +108,7 @@ class Parameter_server:
                 pre_grad[i] = cur_grad
                 comm += 1
                 self.comm_event[i].append(1)
-                print "step:", step, "mac:", i
+                print("step:", step, "mac:", i)
             else:
                 new_grad_li.append(pre_grad[i])
                 self.comm_event[i].append(0)
@@ -141,9 +145,9 @@ class Parameter_server:
         print("comm cost:", self.comm_cost[-1])
         print("train end!")
 
-    def plot_curve(self):
-
-        s1 = 'D10_alpha0.02'
+    def plot_curve(self, s1 = 'D10_alpha0.02'):
+        if not os.path.exists('./result/' + s1):
+            os.makedirs('./result/' + s1)
 
         np.save('./result/' + s1 + '/x_li.npy', self.x_li)
         np.save('./result/' + s1 + '/comm-event.npy', self.comm_event)
@@ -165,8 +169,6 @@ class Parameter_server:
         plt.show()
 
         self.comm_cost.pop(0)
-        #print len(self.comm_cost)
-        #print len(self.x_star_norm)
         np.save('./result/' + s1 + '/comm.npy', self.comm_cost)
 
         plt.semilogy(self.comm_cost, self.x_star_norm)
@@ -176,21 +178,71 @@ class Parameter_server:
         plt.savefig('./result/' + s1 + '/comm.png')
         plt.show()
 
+    def broadcast_LocalSGD(self, x, old_theta, alpha, batch_size, step, LOCAL_SGD_TIME):
+
+        new_x_li = []
+        comm = self.comm_cost[-1]
+
+        batch_size = int(batch_size)
+        for i, mac in enumerate(self.machines):
+            # local SGD
+            local_x = x.copy()
+            for _ in range(LOCAL_SGD_TIME):
+                cur_grad = mac.update(local_x, batch_size)
+                local_x = local_x - alpha * cur_grad
+            new_x_li.append(local_x)
+            comm += 1
+            self.comm_event[i].append(1)
+        if step % 50 == 0:
+            log("step:", step)
+        self.comm_cost.append(comm)
+        return new_x_li
+
+    def train_LocalSGD(self, init_x, alpha, LOCAL_SGD_TIME):
+    
+        self.old_x.append(init_x)
+        x_star = np.load('./data/y.npy')
+        self.x_li.append(init_x)
+        x = init_x
+        eta1=1.1
+        sigma0=.1
+        eta2=.91
+        batch_size=eta1
+        control_size=sigma0*eta2
+        for i in range(num_iter):
+            model_li = self.broadcast_LocalSGD(x, self.old_x, alpha, batch_size, i, LOCAL_SGD_TIME)
+            x = cal_mean(model_li)
+            self.x_li.append(x)
+            self.x_star_norm.append(np.linalg.norm(x - x_star))
+            if batch_size>max_batch:
+                batch_size=max_batch
+            else:
+                batch_size=batch_size*eta1
+            control_size=control_size*eta2
+        log("comm cost:", self.comm_cost[-1])
+        log("train end!")
 
 def init():
     server = Parameter_server()
     return server
 
 def main():
-    server = init()
-    init_x = np.zeros((dimension, 1))
     # init_x = []
     # for i in range(num_machines):
     #     init_x.append(np.zeros((dimension, )))
-    alpha = 0.02
-    D = 10
-    server.train(init_x, alpha, D)
-    server.plot_curve()
+    alphas = [0.02, 0.06, 0.10]
+    LOCAL_SGD_TIMEs = [20, 30, 40]
+    for alpha in alphas:
+        for LOCAL_SGD_TIME in LOCAL_SGD_TIMEs:
+            log(f'[Begin] LocalSGD-alpha-{alpha}-TIME-{LOCAL_SGD_TIME}')
+            server = init()
+            init_x = np.zeros((dimension, 1))
+            # D = 10
+            # SGD/LAG/CSGD
+            # server.train(init_x, alpha, D)
+            # server.plot_curve()
+            server.train_LocalSGD(init_x, alpha, LOCAL_SGD_TIME)
+            server.plot_curve(f'LocalSGD-alpha-{alpha}-TIME-{LOCAL_SGD_TIME}')
 
 main()
 
