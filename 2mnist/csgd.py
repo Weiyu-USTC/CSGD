@@ -1,10 +1,17 @@
 import numpy as np
 import random
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import time
-from math import log
+import os
 # np.set_printoptions(threshold='nan')
 np.random.seed(3)
+
+# ====================================================
+def log(*k, **kw):
+    timeStamp = time.strftime('[%y-%m-%d %H:%M:%S] ', time.localtime())
+    print(timeStamp, end='')
+    print(*k, **kw)
+
 
 num_class = 10
 num_feature = 28 * 28
@@ -62,11 +69,7 @@ def cal_acc(test_x, test_y, theta):
 
 
 def cal_mean(grad_li):
-    m = len(grad_li)
-    grad = np.zeros_like(grad_li[0])
-    grad = sum(grad_li)
-    # grad = grad / m
-    return grad
+    return sum(grad_li) / len(grad_li)
 
 
 def cal_max_norm_grad(theta):
@@ -120,8 +123,9 @@ class Machine:
         # print batch_size
         if batch_size >= m:
             batch_size = m
-        id = random.randint(0, m - batch_size)
-        grad_f = cal_total_grad(self.data_x[id:(id + batch_size)], self.data_y[id:(id + batch_size)], theta)
+        begin = random.randint(0, m)
+        idx = [i % m for i in range(begin, begin + batch_size)]
+        grad_f = cal_total_grad(self.data_x[idx], self.data_y[idx], theta)
         return grad_f
 
 
@@ -163,6 +167,8 @@ class Parameter_server:
         self.train_lbl = train_lbl
 
         samples_per_machine = num_train / num_machines
+        samples_per_machine = int(samples_per_machine)
+
         self.machines = []
         #########  i.i.d case
         for i in range(num_machines):
@@ -209,7 +215,7 @@ class Parameter_server:
                 pre_grad[i] = cur_grad
                 comm += 1
                 self.comm_event[i].append(1)
-                print "step:", step, "mac:", i
+                print("step:", step, "mac:", i)
             else:
                 new_grad_li.append(pre_grad[i])
                 self.comm_event[i].append(0)
@@ -261,24 +267,58 @@ class Parameter_server:
         #         self.min_acc[i]=min(self.min_acc[i-1],self.acc_li[i])
         print("train end!")
 
-    def plot_curve(self):
-        """plot the loss curve and the acc curve
-        save the learned theta to a numpy array and a txt file"""
+    def broadcast_localSGD(self, theta, alpha, batch_size, step, LOCAL_SGD_TIME):
+        """Broadcast theta
+        Accepts theta, a numpy array of shape:(dimension,)
+        Return a list of length 'num_machines' containing the updated theta of each machine"""
 
-        s1 = 'alpha0.1_D10'
-        np.save('./result/' + s1 + '/0acc.npy', self.acc_li)
+        new_x_li = []
+        comm = self.temp_comm[-1]
 
-        plt.plot(np.arange(len(self.acc_li)) * 2, self.acc_li)
-        plt.xlabel('iter')
-        plt.ylabel('error')#plt.ylabel('min(error)')#
-        # plt.title(s1)
-        plt.savefig('./result/' + s1 + '/0acc.png')
-        plt.show()
+        batch_size = int(batch_size)
+        for i, mac in enumerate(self.machines):
+            # local SGD
+            local_x = theta.copy()
+            for _ in range(LOCAL_SGD_TIME):
+                cur_grad = mac.update(local_x, batch_size)
+                local_x = local_x - alpha * cur_grad
+            new_x_li.append(local_x)
+            comm += 1
+            self.comm_event[i].append(1)
+        if step % 50 == 0:
+            log("step:", step)
+        if step % 2 == 0:
+            self.comm_cost.append(comm)
+        self.temp_comm.append(comm)
+        return new_x_li
+            
+
+    def train_localSGD(self, init_theta, alpha, LOCAL_SGD_TIME):
+        """Peforms num_iter rounds of update, appends each new theta to theta_li
+        Accepts the initialed theta, a numpy array has shape:(dimension,)"""
         
+        theta = init_theta
+        eta1=1.05
+        batch_size=eta1
+        for i in range(num_iter):
+            theta_li = self.broadcast_localSGD(theta, alpha, batch_size, i, LOCAL_SGD_TIME)
+            theta = cal_mean(theta_li)
+            if (i + 1) % 2 == 0:
+                acc = 1-(cal_acc(self.test_img_bias, self.test_lbl, theta))
+                self.acc_li.append(acc)
+            batch_size=batch_size*eta1
+        log("comm cost:", self.temp_comm[-1])
+        log("train end!")
+
+    def plot_curve(self, s1 = 'D10_alpha0.02'):
+        if not os.path.exists('./result/' + s1):
+            os.makedirs('./result/' + s1)
+
+        np.save('./result/' + s1 + '/acc.npy', self.acc_li)        
         self.comm_cost.pop(0)
         #print len(self.comm_cost)
         #print len(self.acc_li)
-        np.save('./result/' + s1 + '/0comm.npy', self.comm_cost)
+        np.save('./result/' + s1 + '/comm.npy', self.comm_cost)
         #np.save('./result/' + s1 + '/comm-event.npy', self.comm_event)
 
         plt.plot(self.comm_cost, self.acc_li)
@@ -308,13 +348,20 @@ def init():
 
 
 def main():
-    np.random.seed(3)
-    server = init()
-    init_theta = np.zeros((num_class, num_feature + 1))
-    alpha = 0.01
-    D = 10
-    server.train(init_theta, alpha, D)
-    server.plot_curve()
+    alphas = [0.01]
+    LOCAL_SGD_TIMEs = [30]
+    for alpha in alphas:
+        for LOCAL_SGD_TIME in LOCAL_SGD_TIMEs:
+            np.random.seed(3)
+            server = init()
+            init_theta = np.zeros((num_class, num_feature + 1))
+            # alpha = 0.01
+            # D = 10
+            # server.train(init_theta, alpha, D)
+            # server.plot_curve()
+
+            server.train_localSGD(init_theta, alpha, LOCAL_SGD_TIME)
+            server.plot_curve(f'LocalSGD-alpha-{alpha}-TIME-{LOCAL_SGD_TIME}')
 
 
 main()
