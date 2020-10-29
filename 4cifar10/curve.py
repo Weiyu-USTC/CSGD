@@ -4,7 +4,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import pickle
 import numpy as np
 
-CACHE_DIR = './cache/CIFAR-10_CIFAR-10_ResNet_'
+CACHE_DIR = './cache/CIFAR10_ResNet_'
 
 # wy
 fontsize = 18
