@@ -1,1 +1,3 @@
-
+0: CSGD
+1: LAG_S
+2: SGD
