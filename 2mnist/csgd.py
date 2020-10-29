@@ -19,38 +19,35 @@ num_train = 60000
 num_test = 10000
 num_machines = 10
 
-num_iter = 170
+censor_type = 0 ### type:0 - CSGD; 1 - SGD; 2 - LAG; 3 - local sgd
+num_iter = 500
+eta1 = 1.01
+alpha = 0.1
+D = 10
+sigma0 = .7
+eta2 = 0.991
+max_batch = (num_train / num_machines) / 6
+
 def cal_total_grad(X, Y, theta):
 
     """
-    :param X: shape(num_samples, features + 1)
-    :param Y: labels' one_hot array, shape(num_samples, num_classes)
-    :param theta: shape (num_classes, feature+1)
+    :param X: shape(num_train, num_feature + 1)
+    :param Y: labels' one_hot array, shape(num_train, num_class)
+    :param theta: shape (num_class, num_feature+1)
     :param weight_lambda: scalar
-    :return: grad, shape(num_classes, feature+1)
+    :return: grad, shape(num_class, num_feature+1)
     """
     m = X.shape[0]
     # loss = 0.0
-    t = np.dot(theta, X.T) #(num_classes, num_samples)
-    t = t - np.max(t, axis=0)
-    pro = np.exp(t) / np.sum(np.exp(t), axis=0)
-    total_grad = -np.dot((Y.T - pro), X) / m
+    t = np.exp(np.dot(theta, X.T)) #(num_classes, num_samples)
+    # t = t - np.max(t, axis=0)
+    t_sum = np.sum(t, axis=0)
+    pro = t / t_sum
+    total_grad = - np.dot((Y.T - pro), X) / m
     # add regularization term
-    weight_lambda = 0.00#0.001
-    total_grad = total_grad + weight_lambda * theta
-    # loss = -np.sum(Y.T * np.log(pro)) / m + weight_lambda / 2 * np.sum(theta ** 2)
+    # weight_lambda = 0.001
+    # total_grad = total_grad + weight_lambda * theta
     return total_grad
-
-
-def cal_loss(X, Y, theta, weight_lambda):
-
-    m = X.shape[0]
-    t1 = np.dot(theta, X.T)
-    t1 = t1 - np.max(t1, axis=0)
-    t = np.exp(t1)
-    tmp = t / np.sum(t, axis=0)
-    loss = -np.sum(Y.T * np.log(tmp)) / m + weight_lambda * np.sum(theta ** 2) / 2
-    return loss
 
 
 def cal_acc(test_x, test_y, theta):
@@ -59,10 +56,9 @@ def cal_acc(test_x, test_y, theta):
     m = test_x.shape[0]
     for i in range(m):
         t1 = np.dot(theta, test_x[i])
-        t1 = t1 - np.max(t1, axis=0)
-        pro = np.exp(t1)
-        index = np.argmax(pro)
-        if index == test_y[i]:
+        # t1 = t1 - np.max(t1, axis=0)
+        pro = np.exp(t1) # un-normalized prob
+        if np.argmax(pro) == test_y[i]:
             num += 1
     acc = float(num) / m
     return acc
@@ -70,38 +66,6 @@ def cal_acc(test_x, test_y, theta):
 
 def cal_mean(grad_li):
     return sum(grad_li) / len(grad_li)
-
-
-def cal_max_norm_grad(theta):
-    if np.all(theta == 0):
-        return theta
-    tmp = np.abs(theta)
-    re = np.where(tmp == np.max(tmp))
-    row = re[0][0]
-    col = re[1][0]
-    max_val = tmp[row, col]
-    n = len(re[0])
-    theta[tmp != np.max(tmp)] = 0
-    theta[theta == -max_val] = -1.0 / n
-    theta[theta == max_val] = 1.0 / n
-    return theta
-
-
-def cal_var(theta):
-    mean_theta = np.mean(theta, axis=0)
-    mean_arr = np.tile(mean_theta, (theta.shape[0], 1))
-    tmp = theta - mean_arr
-    var = np.trace(np.dot(tmp, tmp.T))
-    return var
-
-
-def huber_loss_grad(e, d):
-
-    t = (np.abs(e) <= d) * e
-    e[np.abs(e) <= d] = 0
-    grad = t + d * np.sign(e)
-    return grad
-
 
 class Machine:
     def __init__(self, data_x, data_y, machine_id):
@@ -119,13 +83,18 @@ class Machine:
          Accepts theta, a np array with shape of (dimension,)
          Returns the calculated gradient"""
         m = self.data_x.shape[0]
-        # print "m:", m
-        # print batch_size
         if batch_size >= m:
-            batch_size = m
-        begin = random.randint(0, m)
-        idx = [i % m for i in range(begin, begin + batch_size)]
-        grad_f = cal_total_grad(self.data_x[idx], self.data_y[idx], theta)
+            # batch_size = m
+            idx = [random.randint(0, m-1) for i in range(0,batch_size)]
+            grad_f = cal_total_grad(self.data_x[idx], self.data_y[idx], theta)
+            # grad_f = cal_total_grad(self.data_x, self.data_y, theta)
+        else:
+            # begin = random.randint(0, m)
+            idx = [random.randint(0, m-1) for i in range(0,batch_size)]
+            # idx = [i % m for i in range(begin, begin + batch_size)]
+            grad_f = cal_total_grad(self.data_x[idx], self.data_y[idx], theta)
+        # idx = [random.randint(0, m-1) for i in range(0, batch_size)]
+        # grad_f = cal_total_grad(self.data_x[idx], self.data_y[idx], theta)
         return grad_f
 
 
@@ -136,7 +105,6 @@ class Parameter_server:
         self.acc_li = []
         self.grad_li = []
         self.grad_norm = []
-        self.acc_li = []
         self.loss_li = []
         self.comm_cost = []
         self.comm_cost.append(0)
@@ -144,7 +112,6 @@ class Parameter_server:
         self.temp_comm = []
         self.temp_comm.append(0)
         self.comm_event = [[0] for _ in range(num_machines)]
-        self.min_acc = []
         
         self.pre_grad = [np.zeros((num_class, num_feature + 1)) for _ in range(num_machines)]
 
@@ -184,8 +151,8 @@ class Parameter_server:
 
         new_grad_li = []
         comm = self.temp_comm[-1]
-        if censor_type ==1:
-            tao = 0.0   # SGD
+        if censor_type == 1:
+            tao = -1e-8   # SGD
         else:
             if len(old_theta) < D:
                 if censor_type == 0:
@@ -197,28 +164,23 @@ class Parameter_server:
                 for j in range(1, len(old_theta)):
                     temp_diff.append(np.sum((old_theta[j] - old_theta[j - 1]) ** 2))
                 if censor_type == 0:
-                    tao = (sum(temp_diff) / (alpha**2*60 *D) + control_size)/(num_machines**2)
+                    tao = (sum(temp_diff) / (alpha**2 * 60 *D) + control_size)/(num_machines**2)
                 else:
-                    tao = sum(temp_diff) / (alpha**2*60 *D*num_machines**2)
-                #print "step:", step, "temp_diff:", temp_diff
-        print("step:", step, "tao:", tao)
+                    tao = sum(temp_diff) / (alpha**2 * 60 * D * num_machines**2)
 
-
-        batch_size = int(batch_size)
         for i, mac in enumerate(self.machines):
-            cur_grad = mac.update(theta, batch_size)
+            cur_grad = mac.update(theta, int(batch_size))
             grad_diff = np.sum((cur_grad - pre_grad[i]) ** 2)
-            # print(grad_diff)
             if grad_diff > tao:
-                # print "step:", step, "mac:", i
                 new_grad_li.append(cur_grad)
                 pre_grad[i] = cur_grad
                 comm += 1
                 self.comm_event[i].append(1)
-                print("step:", step, "mac:", i)
+                # print("step:", step, "mac:", i)
             else:
                 new_grad_li.append(pre_grad[i])
                 self.comm_event[i].append(0)
+                # print("step:", step, "tao:", tao)
         if step % 2 == 0:
             self.comm_cost.append(comm)
         self.temp_comm.append(comm)
@@ -232,14 +194,11 @@ class Parameter_server:
         # print "len pre_grad:", len(self.pre_grad)
         self.old_theta.append(init_theta)
         theta = init_theta
-        eta1=1.05
-        sigma0=15
-        eta2=0.96
-        batch_size=eta1
-        control_size=sigma0*eta2*6000**2 
+        batch_size = 50
+        control_size = sigma0 * (num_train / num_machines) ** 2 
         # there's a scaling, which should be equivalently put in the gradients.
         for i in range(num_iter):
-            rec_grad_li = self.broadcast(theta, self.old_theta, self.pre_grad, alpha, batch_size, control_size,  D, i, 0)
+            rec_grad_li = self.broadcast(theta, self.old_theta, self.pre_grad, alpha, batch_size, control_size,  D, i, censor_type)
             mean_grad = cal_mean(rec_grad_li)
             theta = theta - alpha * mean_grad
             if len(self.old_theta) < D:
@@ -248,49 +207,17 @@ class Parameter_server:
                 self.old_theta.pop(0)
                 self.old_theta.append(theta)
             if (i + 1) % 2 == 0:
-                acc = 1-(cal_acc(self.test_img_bias, self.test_lbl, theta))
-                self.acc_li.append(acc)
-                #print "step:", i, " acc:", acc
-
-            #self.x_li.append(x)
-            #self.x_star_norm.append(np.linalg.norm(x - x_star))
-            batch_size=batch_size*eta1
-            control_size=control_size*eta2
-            #print "step:", i, "grad_norm:", np.linalg.norm(mean_grad)
-            #print "step:", i, "x_star_norm:", self.x_star_norm[-1]
+                err = 1 - cal_acc(self.test_img_bias, self.test_lbl, theta)
+                self.acc_li.append(err)
+                # log(err)
+                if err < 0.1:
+                    break
+            batch_size = min(max_batch, batch_size * eta1)
+            control_size = control_size * eta2
+            log("step:", i, " comm:", self.temp_comm[-1])
+            
         print("comm cost:", self.temp_comm[-1])
-        # self.min_acc=self.acc_li
-        # for i in range(len(self.acc_li)):
-        #     if i == 0:
-        #         self.min_acc[0]=self.acc_li[0]
-        #     else:
-        #         self.min_acc[i]=min(self.min_acc[i-1],self.acc_li[i])
         print("train end!")
-
-    def broadcast_localSGD(self, theta, alpha, batch_size, step, LOCAL_SGD_TIME):
-        """Broadcast theta
-        Accepts theta, a numpy array of shape:(dimension,)
-        Return a list of length 'num_machines' containing the updated theta of each machine"""
-
-        new_x_li = []
-        comm = self.temp_comm[-1]
-
-        batch_size = int(batch_size)
-        for i, mac in enumerate(self.machines):
-            # local SGD
-            local_x = theta.copy()
-            for _ in range(LOCAL_SGD_TIME):
-                cur_grad = mac.update(local_x, batch_size)
-                local_x = local_x - alpha * cur_grad
-            new_x_li.append(local_x)
-            comm += 1
-            self.comm_event[i].append(1)
-        if step % 50 == 0:
-            log("step:", step)
-        if step % 2 == 0:
-            self.comm_cost.append(comm)
-        self.temp_comm.append(comm)
-        return new_x_li
             
 
     def train_localSGD(self, init_theta, alpha, LOCAL_SGD_TIME):
@@ -298,76 +225,87 @@ class Parameter_server:
         Accepts the initialed theta, a numpy array has shape:(dimension,)"""
         
         theta = init_theta
-        eta1=1.05
-        batch_size=eta1
+        log(theta.shape)
+        self.acc_li.append(1 - cal_acc(self.test_img_bias, self.test_lbl, theta))
+        comm = 0
+        self.comm_cost.append(comm)
+
+        batch_size = 50
+        local_theta = []
+        for i, mac in enumerate(self.machines):
+            local_theta.append(theta.copy())
+
         for i in range(num_iter):
-            theta_li = self.broadcast_localSGD(theta, alpha, batch_size, i, LOCAL_SGD_TIME)
-            theta = cal_mean(theta_li)
+            # theta_li = self.broadcast_localSGD(theta, alpha, batch_size, i, LOCAL_SGD_TIME)
+            # theta = cal_mean(theta_li)
+            if i % LOCAL_SGD_TIME != 0:
+                for j, mac in enumerate(self.machines):
+                    cur_grad = mac.update(local_theta[j], int(batch_size))
+                    local_theta[j] = local_theta[j] - alpha * cur_grad
+                    self.comm_event[j].append(0)
+            else:
+                for j, mac in enumerate(self.machines):
+                    cur_grad = mac.update(theta, int(batch_size))
+                    local_theta[j] = theta - alpha * cur_grad
+                    comm += 1
+                    self.comm_event[j].append(1)
+            theta = cal_mean(local_theta)
             if (i + 1) % 2 == 0:
-                acc = 1-(cal_acc(self.test_img_bias, self.test_lbl, theta))
-                self.acc_li.append(acc)
-            batch_size=batch_size*eta1
-        log("comm cost:", self.temp_comm[-1])
+                self.comm_cost.append(comm)
+                err = 1 - cal_acc(self.test_img_bias, self.test_lbl, theta)
+                self.acc_li.append(err)
+                if err < 0.1:
+                    break
+            if i % 50 == 0:
+                log("step:", i)
+            batch_size = min(max_batch, batch_size * eta1)
+            log('step:',i,'batch_size',batch_size)
+        log("comm cost:", comm)
         log("train end!")
 
-    def plot_curve(self, s1 = 'D10_alpha0.02'):
+    def plot_curve(self, s1 = 'alpha2e-5_D10'):
         if not os.path.exists('./result/' + s1):
             os.makedirs('./result/' + s1)
 
-        np.save('./result/' + s1 + '/acc.npy', self.acc_li)        
+        np.save('./result/' + s1 + '/' + str(censor_type) + 'acc.npy', self.acc_li)        
         self.comm_cost.pop(0)
-        #print len(self.comm_cost)
-        #print len(self.acc_li)
-        np.save('./result/' + s1 + '/comm.npy', self.comm_cost)
+        np.save('./result/' + s1 + '/' + str(censor_type) + 'comm.npy', self.comm_cost)
         #np.save('./result/' + s1 + '/comm-event.npy', self.comm_event)
 
         plt.plot(self.comm_cost, self.acc_li)
         plt.xlabel('communication cost')
-        plt.ylabel('error')#plt.ylabel('min(error)')#
+        plt.ylabel('error')
         # plt.title(s1)
-        plt.savefig('./result/' + s1 + '/0comm.png')
+        plt.savefig('./result/' + s1 + '/' + str(censor_type) + 'comm.png')
         plt.show()
-
-        # plt.semilogy(np.arange(num_iter), self.grad_norm)
-        # plt.xlabel('iter')
-        # plt.ylabel('log||grad||')
-        # # plt.title(s1)
-        # plt.savefig('./result/RSGD/no_fault/same_digit/' + s1 + '/grad_norm.png')
-        # plt.show()
-
-        # plt.semilogy(np.arange(num_iter), self.var_li)
-        # plt.xlabel('iter')
-        # plt.ylabel('log||var||')
-        # plt.savefig('./result/RSGD/fault/same_attack/q8/' + s1 + '/var.png')
-        # plt.show()
-
 
 def init():
     server = Parameter_server()
     return server
 
-
 def main():
-    alphas = [0.01]
-    LOCAL_SGD_TIMEs = [30]
-    for alpha in alphas:
-        for LOCAL_SGD_TIME in LOCAL_SGD_TIMEs:
-            np.random.seed(3)
-            server = init()
-            init_theta = np.zeros((num_class, num_feature + 1))
+    init_theta = np.load('./init_theta.npy') # np.zeros((num_class, num_feature + 1))
+    np.random.seed(3)
+    server = init()
+    ### CSGD/SGD/LAG/local: 0/1/2/3
+    if censor_type < 3:
+        server.train(init_theta, alpha, D)
+    else: # local sgd 
+        server.train_localSGD(init_theta, alpha, D)
+    server.plot_curve()
+
+    # for alpha in alphas:
+    #     for LOCAL_SGD_TIME in LOCAL_SGD_TIMEs:
+    #         np.random.seed(3)
+    #         server = init()
+    #         init_theta = np.zeros((num_class, num_feature + 1))
             # alpha = 0.01
             # D = 10
             # server.train(init_theta, alpha, D)
             # server.plot_curve()
 
-            server.train_localSGD(init_theta, alpha, LOCAL_SGD_TIME)
-            server.plot_curve(f'LocalSGD-alpha-{alpha}-TIME-{LOCAL_SGD_TIME}')
+            # server.train_localSGD(init_theta, alpha, LOCAL_SGD_TIME)
+            # server.plot_curve(f'LocalSGD-alpha-{alpha}-TIME-{LOCAL_SGD_TIME}')
 
 
 main()
-# import cProfile
-# import pstats
-# s1 = 'lam0.07_wei0.01_alpha0.001_sqrt_time(test4)'
-# cProfile.run("main()", filename="./result/RSGD/fault/same_attack/q8/" + s1 + "/result_profile.out", sort="tottime")
-# p = pstats.Stats("./result/RSGD/fault/same_attack/q8/" + s1 + "/result_profile.out")
-# p.strip_dirs().sort_stats('tottime').print_stats(0.2)
