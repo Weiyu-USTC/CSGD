@@ -1,3 +1,7 @@
-0: CSGD
-1: LAG_S
-2: SGD
+type:
+
+0 - CSGD; 
+
+1 - SGD; 
+
+2 - LAG.
